@@ -7,6 +7,14 @@ from app.llm import LLMClient
 from app.routes import ingest, query
 from app.vectorstore import VectorStore
 
+#long the errors 
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

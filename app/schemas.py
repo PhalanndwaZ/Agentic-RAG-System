@@ -28,3 +28,15 @@ class QueryResponse(BaseModel):
     answer: str
     retrieved_chunks: list[RetrievedChunk]
     used_retrieval: bool
+
+class FolderIngestResponse(BaseModel):
+    """Summary of a batch ingest — one entry per file processed, plus
+    an overall total."""
+    files_processed: int
+    total_chunks_created: int
+    skipped: list[str]
+
+class FolderIngestRequest(BaseModel):
+    """Request body for POST /ingest-folder — a local path to a directory
+    of files, rather than a single file upload."""
+    folder_path: str
