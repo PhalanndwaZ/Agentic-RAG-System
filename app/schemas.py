@@ -40,3 +40,18 @@ class FolderIngestRequest(BaseModel):
     """Request body for POST /ingest-folder — a local path to a directory
     of files, rather than a single file upload."""
     folder_path: str
+
+
+class AgenticQueryRequest(BaseModel):
+    """Request body for POST /agentic-query."""
+    question: str
+
+
+class AgenticQueryResponse(BaseModel):
+    """Response body for POST /agentic-query — includes the tool-call
+    trace so the caller can see exactly what the agent searched for,
+    not just the final answer."""
+    answer: str
+    tool_calls: list[dict]
+
+

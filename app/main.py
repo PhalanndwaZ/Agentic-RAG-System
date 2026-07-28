@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from app.embeddings import EmbeddingModel
 from app.llm import LLMClient
-from app.routes import ingest, query
+from app.routes import ingest, query, agentic_query
 from app.vectorstore import VectorStore
 
 #long the errors 
@@ -35,6 +35,7 @@ app = FastAPI(title="Agentic RAG API", version="0.1.0", lifespan=lifespan)
 # onto this app, grouped by tag for the /docs Swagger UI.
 app.include_router(ingest.router, tags=["ingest"])
 app.include_router(query.router, tags=["query"])
+app.include_router(agentic_query.router, tags=["agentic-query"])
 
 
 @app.get("/health")
