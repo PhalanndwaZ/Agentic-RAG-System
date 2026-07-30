@@ -44,23 +44,21 @@ SEARCH_DOCS_TOOL = {
 
 
 def execute_tool_call(tool_call, embedder, store) -> dict:
-    # When Groq decides to call a tool, it returns the tool name and
-    # arguments as a JSON string (not a Python dict) — parse that and
-    # dispatch to the real Python function.
     args = json.loads(tool_call.function.arguments)
 
     if tool_call.function.name == "search_docs":
         results = search_docs(args["query"], embedder, store)
-        # Only count results as "relevant" if the best match clears our
-        # similarity threshold — same bar /query already uses, so both
-        # endpoints agree on what counts as a genuine match vs. noise.
         has_relevant = bool(results) and results[0].similarity >= SIMILARITY_THRESHOLD
 
         if not results:
             content = "No relevant results found."
         else:
+            # Tag each chunk with its source filename so the model can
+            # cite which paper a fact came from, without needing the
+            # full document — just the short identifier.
             content = "\n\n---\n\n".join(
-                f"[similarity: {chunk.similarity:.2f}] {chunk.content}" for chunk in results
+                f"[source: {chunk.source}] [similarity: {chunk.similarity:.2f}] {chunk.content}"
+                for chunk in results
             )
         return {"content": content, "has_relevant": has_relevant, "results": results}
 
@@ -100,7 +98,12 @@ def run_agent(
                 "search returns weak or irrelevant results, reformulate the query and "
                 "try again — but once you have relevant results, answer using them "
                 "rather than continuing to search. "
-                "Answer only using information retrieved via search_docs."
+                "Answer only using information retrieved via search_docs. Each "
+                "retrieved chunk is tagged with its source document, like "
+                "[source: filename.pdf]. When you answer, cite which document each "
+                "fact came from, especially if your answer draws on more than one "
+                "document — do not blend facts from different papers into one "
+                "statement without attributing them separately."
             ),
         },
         {"role": "user", "content": question},

@@ -7,6 +7,7 @@ class RetrievedChunk(BaseModel):
     chunk_id: str
     content: str
     similarity: float = Field(..., description="Cosine similarity, 0-1, higher is more relevant")
+    source: str = Field(..., description="Filename of the document this chunk came from")
 
 
 class IngestResponse(BaseModel):

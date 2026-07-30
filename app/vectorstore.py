@@ -47,11 +47,14 @@ class VectorStore:
 
     def similarity_search(self, query_embedding: list[float], top_k: int = 5) -> list[RetrievedChunk]:
         with self._conn.cursor() as cur:
+            # Join chunks to documents so we can return which paper each
+            # chunk came from, alongside its content and similarity score.
             cur.execute(
                 """
-                SELECT id, content, 1 - (embedding <=> %s::vector) AS similarity
+                SELECT chunks.id, chunks.content, 1 - (chunks.embedding <=> %s::vector) AS similarity, documents.source
                 FROM chunks
-                ORDER BY embedding <=> %s::vector
+                JOIN documents ON chunks.document_id = documents.id
+                ORDER BY chunks.embedding <=> %s::vector
                 LIMIT %s
                 """,
                 (query_embedding, query_embedding, top_k),
@@ -59,7 +62,7 @@ class VectorStore:
             rows = cur.fetchall()
 
         return [
-            RetrievedChunk(chunk_id=str(row[0]), content=row[1], similarity=float(row[2]))
+            RetrievedChunk(chunk_id=str(row[0]), content=row[1], similarity=float(row[2]), source=row[3])
             for row in rows
         ]
 
