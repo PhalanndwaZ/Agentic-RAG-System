@@ -53,5 +53,14 @@ class AgenticQueryResponse(BaseModel):
     not just the final answer."""
     answer: str
     tool_calls: list[dict]
+    faithfulness: FaithfulnessResult
+
+
+class FaithfulnessResult(BaseModel):
+    """Result of scoring an answer's faithfulness to its retrieved context."""
+    score: int = Field(..., ge=1, le=5, description="1 = not grounded at all, 5 = fully grounded")
+    reasoning: str = Field(..., description="Brief explanation of the score")
+    is_low_confidence: bool = Field(..., description="True if score is below the acceptable threshold")
+
 
 

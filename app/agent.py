@@ -1,6 +1,7 @@
 import json
+from typing import Any
 
-from groq import BadRequestError
+from groq import APIStatusError
 
 SIMILARITY_THRESHOLD = 0.3
 
@@ -61,28 +62,44 @@ def execute_tool_call(tool_call, embedder, store) -> dict:
             content = "\n\n---\n\n".join(
                 f"[similarity: {chunk.similarity:.2f}] {chunk.content}" for chunk in results
             )
-        return {"content": content, "has_relevant": has_relevant}
+        return {"content": content, "has_relevant": has_relevant, "results": results}
 
-    return {"content": f"Unknown tool: {tool_call.function.name}", "has_relevant": False}
+    return {"content": f"Unknown tool: {tool_call.function.name}", "has_relevant": False, "results": []}
 
 
-def run_agent(question: str, embedder, store, groq_client, model: str, max_steps: int = 4) -> dict:
+def run_agent(
+    question: str,
+    embedder,
+    store,
+    groq_client,
+    model: str,
+    max_steps: int = 4,
+    max_retries: int = 6,
+) -> dict:
     """Runs the ReAct-style agent loop: the model reasons about whether it
     needs to search, calls search_docs if so, reads the result, and either
     searches again (e.g. with a reformulated query) or answers directly.
-    Returns the final answer plus a trace of every tool call made. The
+    Returns the final answer plus a trace of every tool call made, plus the
+    actual retrieved context (for downstream faithfulness evaluation). The
     final answer is only trusted if genuinely relevant context was found
-    at some point — otherwise a refusal is enforced in code, regardless
-    of what the model itself tries to answer."""
+    at some point — otherwise a refusal is enforced in code, regardless of
+    what the model itself tries to answer. Malformed tool-call recoveries
+    (retries) are tracked separately from real reasoning steps, so Groq's
+    occasional flakiness doesn't eat into the model's actual max_steps budget."""
 
-    messages = [
+    messages: list[dict[str, Any]] = [
         {
             "role": "system",
             "content": (
                 "You are a helpful assistant with access to a search_docs tool "
-                "that searches a knowledge base. Decide whether a question needs "
-                "a search. If your first search returns weak or irrelevant "
-                "results, try again with a reformulated query before giving up. "
+                "that searches a knowledge base. For ANY question that references "
+                "specific facts, names, numbers, findings, or details that could "
+                "plausibly come from documents in a knowledge base, you MUST call "
+                "search_docs first — do not answer from memory. Only skip search_docs "
+                "for pure greetings, small talk, or basic arithmetic. If your first "
+                "search returns weak or irrelevant results, reformulate the query and "
+                "try again — but once you have relevant results, answer using them "
+                "rather than continuing to search. "
                 "Answer only using information retrieved via search_docs."
             ),
         },
@@ -90,9 +107,12 @@ def run_agent(question: str, embedder, store, groq_client, model: str, max_steps
     ]
 
     tool_calls_made = []
+    all_retrieved_chunks = []  # accumulates every relevant chunk seen, across all calls
     found_relevant_context = False  # code-enforced, not just prompt-trusted
+    retries_used = 0  # counts malformed-tool-call recoveries separately from real steps
 
-    for _ in range(max_steps):
+    step = 0
+    while step < max_steps:
         try:
             response = groq_client.chat.completions.create(
                 model=model,
@@ -100,22 +120,30 @@ def run_agent(question: str, embedder, store, groq_client, model: str, max_steps
                 tools=[SEARCH_DOCS_TOOL],
                 temperature=0.2,
             )
-        except BadRequestError:
+        except APIStatusError:
             # Some models occasionally generate a malformed tool call
-            # (invalid JSON/syntax) that Groq rejects outright. Rather
-            # than crashing the whole request, nudge the model to try
-            # again and let the loop continue.
+            # (invalid JSON/syntax) that Groq rejects outright. Tracked
+            # with its own retries_used counter, separate from step, so
+            # this flakiness never eats into the model's real reasoning
+            # budget.
+            retries_used += 1
+            if retries_used > max_retries:
+                break
+            # Deliberately do NOT offer "answer directly instead" here —
+            # the model already decided to search; this message should
+            # only push it to fix the malformed call, not give it an
+            # excuse to abandon the search attempt entirely.
             messages.append(
                 {
                     "role": "user",
                     "content": (
-                        "Your previous attempt to call a tool was malformed. "
-                        "Please try again, calling the tool correctly, or "
-                        "answer directly if no tool is needed."
+                        "Your previous tool call was malformed and could not be "
+                        "processed. Please retry the exact same tool call with "
+                        "correctly formatted JSON arguments."
                     ),
                 }
             )
-            continue
+            continue  # retry doesn't increment step — doesn't cost a real turn
 
         message = response.choices[0].message
 
@@ -125,18 +153,41 @@ def run_agent(question: str, embedder, store, groq_client, model: str, max_steps
                 return {
                     "answer": "I can only answer questions about the knowledge base, and I don't have relevant information for this one.",
                     "tool_calls": tool_calls_made,
+                    "context_chunks": all_retrieved_chunks,
                 }
-            return {"answer": message.content, "tool_calls": tool_calls_made}
+            return {
+                "answer": message.content,
+                "tool_calls": tool_calls_made,
+                "context_chunks": all_retrieved_chunks,
+            }
 
         # The model wants to call a tool. Append its own turn to the
-        # conversation first (required by the API), then execute each
-        # requested call.
-        messages.append(message)
+        # conversation first (required by the API) — reconstructed as a
+        # plain dict, since Groq's API rejects the raw SDK object type
+        # if we pass it back in directly.
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in message.tool_calls
+                ],
+            }
+        )
 
         for tool_call in message.tool_calls:
             result = execute_tool_call(tool_call, embedder, store)
             if result["has_relevant"]:
                 found_relevant_context = True
+                # Only keep chunks from calls that actually cleared the
+                # relevance bar — no point evaluating faithfulness against
+                # noise the agent itself ignored.
+                all_retrieved_chunks.extend(chunk.content for chunk in result["results"])
 
             tool_calls_made.append(
                 {"tool": tool_call.function.name, "arguments": tool_call.function.arguments}
@@ -152,10 +203,17 @@ def run_agent(question: str, embedder, store, groq_client, model: str, max_steps
                 }
             )
 
-    # Safety valve: max_steps reached without a settled answer.
+        step += 1  # a real reasoning turn happened — this is what counts toward max_steps
+
+    # Safety valve: max_steps (or max_retries) reached without a settled answer.
     if not found_relevant_context:
         return {
             "answer": "I can only answer questions about the knowledge base, and I don't have relevant information for this one.",
             "tool_calls": tool_calls_made,
+            "context_chunks": all_retrieved_chunks,
         }
-    return {"answer": "I wasn't able to settle on an answer in time.", "tool_calls": tool_calls_made}
+    return {
+        "answer": "I wasn't able to settle on an answer in time.",
+        "tool_calls": tool_calls_made,
+        "context_chunks": all_retrieved_chunks,
+    }
